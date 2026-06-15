@@ -668,496 +668,36 @@ def build_smart_video_fallback(video, transcript):
     }
 
 
-
-
-def _contains_any(text, terms):
-    return any(term in text for term in terms)
-
-
-def _top_recent_video_titles(df, limit=5):
-    if df.empty or "title" not in df.columns:
-        return []
-    sort_col = "performance_score" if "performance_score" in df.columns else "views"
-    return (
-        df.sort_values(sort_col, ascending=False)
-        .head(limit)["title"]
-        .fillna("")
-        .astype(str)
-        .tolist()
-    )
-
-
-def _clean_strategy_word(word):
-    return re.sub(r"[^A-Za-z0-9']", "", str(word)).strip().lower()
-
-
-def _channel_stopwords(channel):
-    base = {
-        "the", "and", "for", "with", "from", "that", "this", "into", "your", "you",
-        "are", "was", "were", "their", "they", "his", "her", "its", "our", "out",
-        "how", "why", "what", "when", "where", "best", "top", "official", "video",
-        "videos", "clips", "clip", "scene", "scenes", "shorts", "latest", "watch",
-        "new", "old", "full", "part", "episode", "episodes", "season", "movie", "movies",
-        "film", "films", "cinema", "cinemas", "exclusively", "exclusive", "release",
-        "released", "releasing", "trailer", "teaser", "launch", "announcement", "review",
-        "reviews", "glowing", "bright", "july", "june", "may", "april", "march", "august",
-        "september", "october", "november", "december", "january", "february", "in", "on",
-        "at", "to", "of", "by", "a", "an", "is", "as", "we", "us", "our", "family",
-        "minutes", "straight", "your", "favourite", "favorite", "iconic", "nostalgic",
-        "real", "main", "character", "brand", "tickets", "sale", "one", "week", "live",
-        "stream", "officially", "now", "here", "there", "thing", "things", "reason", "secret",
-        "secrets", "signs", "start", "stop", "calling", "every", "career", "going", "nowhere"
-    }
-    channel_words = re.findall(r"[A-Za-z0-9']+", str(channel.get("title", "")).lower()) if isinstance(channel, dict) else []
-    base.update([w for w in channel_words if len(w) > 2])
-    return base
-
-
-def _clean_title_for_topic(title):
-    title = str(title or "")
-    title = re.sub(r"[#@][A-Za-z0-9_]+", " ", title)
-    title = re.sub(r"[🔥❤️❤😍🥵⚡🚀✨🎬🎥✅😈🥹]+", " ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
-
-
-def _domain_from_titles(titles):
-    text = " ".join([str(t).lower() for t in titles])
-    domain_rules = [
-        ("photography career and camera education", ["photography", "photographer", "camera", "canon", "nikon", "portrait", "cinematic", "earning", "client", "career"]),
-        ("film release and franchise promotion", ["trailer", "teaser", "cinemas", "release", "re-release", "movie", "film", "cast", "director", "actor", "actress"]),
-        ("music release and fan promotion", ["song", "lyrical", "lyrics", "singer", "music", "audio", "jukebox", "album", "composer"]),
-        ("event access and celebrity/fan moments", ["speech", "press meet", "launch event", "celebrations", "pre-release", "interview"]),
-        ("gaming gameplay and community challenges", ["valorant", "fortnite", "gameplay", "rank", "ping", "clutch", "agent", "controller", "game"]),
-        ("large-scale challenge entertainment", ["challenge", "stranded", "survive", "fight", "$", "million", "prize", "subscriber", "island"]),
-        ("product review and buyer guidance", ["review", "tested", "comparison", "vs", "best", "worst", "buy", "adapter", "lens"]),
-    ]
-    scores = []
-    for label, terms in domain_rules:
-        score = sum(text.count(term) for term in terms)
-        scores.append((label, score))
-    scores.sort(key=lambda x: x[1], reverse=True)
-    return scores[0][0] if scores and scores[0][1] > 0 else "the channel's strongest recurring viewer interest"
-
-
-def _score_content_signals(channel, videos, limit=12):
-    """Weighted signal extraction from strongest recent uploads. Built to avoid title-copy strategy."""
-    df = prepare_video_dataframe(videos)
-    if df.empty:
-        return {
-            "top_titles": [],
-            "format_scores": {},
-            "motivation_scores": {},
-            "archetype_scores": {},
-            "topics": [],
-            "domain": "the channel's strongest recurring viewer interest",
-            "sample_size": 0,
-            "confidence": "Low"
-        }
-
-    sort_col = "performance_score" if "performance_score" in df.columns else "views"
-    top_df = df.sort_values(sort_col, ascending=False).head(limit).copy()
-    sample_size = len(top_df)
-
-    if "performance_score" in top_df.columns:
-        top_df["_weight"] = top_df["performance_score"].apply(lambda x: max(safe_float(x), 10) / 100)
-    else:
-        avg_views = max(safe_float(top_df["views"].mean()), 1) if "views" in top_df.columns else 1
-        top_df["_weight"] = top_df.get("views", 1).apply(lambda x: min(max(safe_float(x) / avg_views, 0.4), 2.0))
-
-    format_rules = {
-        "Trailer / Teaser / Release Promotion": [
-            "trailer", "teaser", "release", "re-release", "in cinemas", "tickets", "launch", "announcement", "pre-release", "coming soon", "first look"
-        ],
-        "Music / Song Release": [
-            "song", "video song", "lyrical", "lyrics", "audio", "music", "jukebox", "album", "singer", "composer", "track"
-        ],
-        "Creator Education / Career Advice": [
-            "how to", "guide", "tutorial", "explained", "beginner", "learn", "tips", "mistakes", "secrets", "signs", "career", "earning", "start earning", "photographer", "photography", "camera", "cinematic"
-        ],
-        "Interview / Speech / Event Access": [
-            "interview", "podcast", "conversation", "talk", "speech", "q&a", "qa", "cast", "panel", "press meet", "launch event", "celebrations", "event"
-        ],
-        "Behind-the-Scenes / Insider Access": [
-            "behind the scenes", "bts", "making", "unseen", "exclusive", "on set", "backstage", "cast talk", "press meet", "unfiltered"
-        ],
-        "Challenge / Competition / Stakes": [
-            "challenge", "survive", "survived", "stranded", "fight", "win", "winner", "last to", "prize", "$", "million", "days", "island", "arctic"
-        ],
-        "Gaming / Live Gameplay": [
-            "valorant", "fortnite", "gameplay", "live", "rank", "ping", "clutch", "controller", "agent", "game", "rank up"
-        ],
-        "Review / Ranking / Comparison": [
-            "review", "reviews", "ranking", "ranked", "comparison", "compared", "versus", "vs", "best", "worst", "tested", "signs"
-        ],
-        "Compilation / Highlights / Clips": [
-            "highlights", "moments", "compilation", "best of", "clips", "scene", "scenes", "top 10", "every"
-        ],
-        "Story / Documentary / Transformation": [
-            "story", "journey", "documentary", "before", "after", "transformation", "truth", "history", "evolution"
-        ],
-        "Brand / Campaign / Advertisement": [
-            "tvc", "ad", "advertisement", "campaign", "commercial", "sponsored", "collection", "clothing", "solar"
-        ],
-        "Personal Brand / Lifestyle": [
-            "day in", "my life", "family", "home", "routine", "vlog", "with me", "daughter", "personal"
-        ],
-    }
-
-    motivation_rules = {
-        "practical utility": ["how to", "guide", "tutorial", "tips", "mistakes", "learn", "explained", "career", "earning", "beginner", "camera"],
-        "contrarian clarity": ["real reason", "think again", "don't", "not", "stop", "stuck", "fooled", "truth", "myth"],
-        "event urgency": ["release", "re-release", "launch", "announcement", "tickets", "in cinemas", "coming soon", "premiere", "pre-release"],
-        "insider access": ["behind the scenes", "bts", "making", "unseen", "exclusive", "speech", "interview", "press", "cast", "unfiltered"],
-        "high stakes": ["win", "prize", "million", "$", "challenge", "fight", "stranded", "survive", "island", "arctic"],
-        "curiosity gap": ["secret", "secrets", "truth", "unexpected", "surprise", "mystery", "never", "hidden", "pov", "can he", "what happens", "reason"],
-        "franchise or topic familiarity": ["resident", "evil", "spider", "eternia", "athadu", "movie", "official", "trailer", "teaser", "pawan", "mahesh"],
-        "nostalgia and familiarity": ["first", "last", "re-release", "throwback", "old", "again", "classic", "iconic", "nostalgic"],
-        "debate and opinions": ["ranked", "ranking", "best", "worst", "vs", "debate", "reaction", "review", "opinion"],
-        "community participation": ["live", "viewer", "community", "comments", "q&a", "qa", "stream", "vote", "choose"],
-        "personality attachment": ["family", "daughter", "cast", "speech", "interview", "vlog", "star", "actor", "actress"],
-    }
-
-    archetype_rules = {
-        "Education": ["how to", "guide", "tutorial", "tips", "mistakes", "learn", "explained", "beginner", "career", "earning"],
-        "Contrarian Advice": ["real reason", "think again", "don't", "not", "stop", "stuck", "fooled", "truth"],
-        "Exclusive Access": ["behind the scenes", "bts", "making", "unseen", "exclusive", "speech", "press meet", "interview", "unfiltered"],
-        "Event Momentum": ["release", "launch", "pre-release", "trailer", "teaser", "tickets", "in cinemas", "premiere"],
-        "Music Discovery": ["song", "lyrical", "lyrics", "audio", "music", "singer", "composer"],
-        "Competition": ["challenge", "vs", "rank", "win", "fight", "winner", "prize"],
-        "Community": ["live", "viewer", "community", "q&a", "stream", "comments"],
-        "Storytelling": ["story", "journey", "documentary", "evolution", "history"],
-        "Nostalgia": ["old", "then and now", "throwback", "memories", "classic", "iconic", "re-release"],
-        "Review / Evaluation": ["review", "tested", "comparison", "best", "worst", "signs", "rating"],
-    }
-
-    format_scores = {k: 0.0 for k in format_rules}
-    motivation_scores = {k: 0.0 for k in motivation_rules}
-    archetype_scores = {k: 0.0 for k in archetype_rules}
-    topic_scores = {}
-    stopwords = _channel_stopwords(channel)
-
-    top_titles = []
-    for _, row in top_df.iterrows():
-        raw_title = str(row.get("title", ""))
-        clean_title = _clean_title_for_topic(raw_title)
-        text_l = clean_title.lower()
-        weight = safe_float(row.get("_weight", 1))
-        top_titles.append(raw_title)
-
-        for label, terms in format_rules.items():
-            for term in terms:
-                if term in text_l:
-                    format_scores[label] += weight * (2.0 if " " in term else 1.0)
-
-        for label, terms in motivation_rules.items():
-            for term in terms:
-                if term in text_l:
-                    motivation_scores[label] += weight * (2.0 if " " in term else 1.0)
-
-        for label, terms in archetype_rules.items():
-            for term in terms:
-                if term in text_l:
-                    archetype_scores[label] += weight * (2.0 if " " in term else 1.0)
-
-        segments = re.split(r"\s*[|:–—-]\s*", clean_title)
-        for seg in segments:
-            seg_words = []
-            for raw_word in re.findall(r"[A-Za-z0-9']+", seg):
-                word = _clean_strategy_word(raw_word)
-                if len(word) < 3 or word in stopwords:
-                    continue
-                seg_words.append(raw_word.strip("'"))
-            if 1 <= len(seg_words) <= 4:
-                candidate = " ".join(seg_words).strip()
-                if len(candidate) >= 4:
-                    topic_scores[candidate.title()] = topic_scores.get(candidate.title(), 0) + weight * (1.5 if len(seg_words) > 1 else 1.0)
-
-    generic_topic_terms = {"Official", "Trailer", "Teaser", "Release", "Cinemas", "Exclusive", "Exclusively", "Brand", "Campaign", "Advertisement", "Video", "Song", "Audio", "Launch", "Event", "Speech"}
-    ranked_topics = sorted(topic_scores.items(), key=lambda item: item[1], reverse=True)
-    topics = []
-    seen = set()
-    for topic, score in ranked_topics:
-        words = topic.split()
-        if not words:
-            continue
-        if all(w in generic_topic_terms for w in words):
-            continue
-        normalized = re.sub(r"[^a-z0-9]", "", topic.lower())
-        if not normalized or normalized in seen:
-            continue
-        if any(normalized in re.sub(r"[^a-z0-9]", "", existing.lower()) or re.sub(r"[^a-z0-9]", "", existing.lower()) in normalized for existing in topics):
-            continue
-        seen.add(normalized)
-        topics.append(topic)
-        if len(topics) >= 5:
-            break
-
-    domain = _domain_from_titles(top_titles)
-    confidence = "Low" if sample_size < 5 else ("Medium" if sample_size < 10 else "High")
-
-    return {
-        "top_titles": top_titles,
-        "format_scores": format_scores,
-        "motivation_scores": motivation_scores,
-        "archetype_scores": archetype_scores,
-        "topics": topics,
-        "domain": domain,
-        "sample_size": sample_size,
-        "confidence": confidence
-    }
-
-
-def infer_growth_pattern_from_videos(channel, videos):
-    """Generic product-grade pattern engine for any YouTube niche."""
-    signals = _score_content_signals(channel, videos)
-    top_titles = signals["top_titles"]
-    if not top_titles:
-        return {
-            "pattern_name": "Not enough recent upload data",
-            "format_signal": "insufficient data",
-            "secondary_format": "",
-            "motivation_signal": "unknown viewer motivation",
-            "archetypes": [],
-            "topics": [],
-            "domain": "the channel's strongest recurring viewer interest",
-            "top_titles": [],
-            "strategy_angle": "Collect more recent videos before making a channel-level strategy decision.",
-            "idea_angle": "a focused follow-up to the clearest existing audience interest",
-            "comment_trigger": "Ask viewers what they want to see next.",
-            "confidence": "Low"
-        }
-
-    format_rank = sorted(signals["format_scores"].items(), key=lambda item: item[1], reverse=True)
-    motivation_rank = sorted(signals["motivation_scores"].items(), key=lambda item: item[1], reverse=True)
-    archetype_rank = sorted(signals["archetype_scores"].items(), key=lambda item: item[1], reverse=True)
-
-    top_format, top_format_score = format_rank[0]
-    second_format, second_score = format_rank[1] if len(format_rank) > 1 else ("", 0)
-    top_motivation, motivation_score = motivation_rank[0]
-
-    if top_format_score <= 0:
-        top_format = "Repeatable Winning Format"
-    if motivation_score <= 0:
-        top_motivation = "clear viewer payoff"
-
-    secondary_format = second_format if second_score >= max(1.2, top_format_score * 0.50) else ""
-    format_phrase = top_format if not secondary_format else f"{top_format} with {secondary_format.lower()}"
-
-    archetypes = [label for label, score in archetype_rank if score > 0][:3]
-    if not archetypes:
-        archetypes = ["Repeatable Format"]
-
-    domain = signals.get("domain", "the channel's strongest recurring viewer interest")
-    topics = signals["topics"]
-    topic_phrase = ", ".join(topics[:3]) if topics else domain
-
-    # Low sample-size channels should be treated as hypotheses, not confident strategy.
-    confidence = signals.get("confidence", "Medium")
-    confidence_prefix = "Early signal: " if confidence == "Low" else ""
-
-    pattern_name = f"{confidence_prefix}{format_phrase} driven by {top_motivation}"
-
-    return {
-        "pattern_name": pattern_name,
-        "format_signal": top_format,
-        "secondary_format": secondary_format,
-        "motivation_signal": top_motivation,
-        "archetypes": archetypes,
-        "topics": topics,
-        "domain": domain,
-        "top_titles": top_titles,
-        "strategy_angle": (
-            f"The repeatable signal is {format_phrase.lower()} serving {top_motivation} within {domain}. "
-            f"The next strategy should build a content lane around {topic_phrase}, but avoid copying exact winning titles. "
-            "The strongest next move is to preserve the viewer promise, then test sharper hooks, clearer packaging, and stronger comment triggers."
-        ),
-        "idea_angle": format_phrase.lower(),
-        "comment_trigger": "Ask viewers to choose, rank, compare, predict, or request the next version so the format creates participation, not only views.",
-        "confidence": confidence
-    }
-
-
-def _topic_or_default(pattern, fallback="the strongest recent topic"):
-    topics = pattern.get("topics") or []
-    return topics[0] if topics else pattern.get("domain", fallback)
-
-
-def _build_specific_ideas(pattern, top_title):
-    topic = _topic_or_default(pattern, top_title)
-    second_topic = pattern.get("topics", [topic, topic])[1] if len(pattern.get("topics", [])) > 1 else topic
-    fmt = pattern.get("format_signal", "Repeatable Winning Format")
-    motivation = pattern.get("motivation_signal", "clear viewer payoff")
-    domain = pattern.get("domain", topic)
-
-    if "Creator Education" in fmt:
-        return [
-            f"The biggest mistake holding back {domain} beginners.",
-            f"5 practical steps to improve {domain} without expensive gear.",
-            f"Stop doing this if you want better results in {domain}.",
-            f"Beginner to paid: a simple roadmap for {domain} creators.",
-            f"Reacting to common myths that keep {domain} creators stuck."
-        ]
-    if "Music" in fmt:
-        return [
-            f"The story behind {topic} and why fans are replaying it.",
-            f"{topic}: lyric moments, hook points, and fan reactions.",
-            f"Making of {topic}: recording, visuals, and artist moments.",
-            f"Fan reaction roundup: what people noticed first in {topic}.",
-            f"{topic} vs {second_topic}: which song has stronger replay value?"
-        ]
-    if "Trailer" in fmt or "Release" in fmt:
-        return [
-            f"Everything viewers need to know before {topic} releases.",
-            f"{topic}: trailer details, questions, and moments fans are reacting to.",
-            f"Behind the release: what makes {topic} worth watching now.",
-            f"{topic} vs {second_topic}: which upcoming release has stronger audience pull?",
-            f"Fan questions answered before the next {topic} update."
-        ]
-    if "Interview" in fmt or "Event" in fmt:
-        return [
-            f"Best moments from the {domain} event that fans should not miss.",
-            f"What {topic} revealed that fans are discussing now.",
-            f"Unfiltered moments from the event: reactions, jokes, and takeaways.",
-            f"Audience questions answered after the strongest recent event clip.",
-            f"The story behind the speech: why this moment connected with fans."
-        ]
-    if "Gaming" in fmt:
-        return [
-            f"Live gameplay challenge: can we win using only viewer-selected rules?",
-            f"Rank-up session with one twist chosen by the audience.",
-            f"Best clutch moments from the stream with viewer reactions.",
-            f"Agent/loadout challenge: what happens when chat controls the game?",
-            f"What went wrong in the hardest match and how to fix it next time."
-        ]
-    if "Brand" in fmt:
-        return [
-            f"Behind the campaign: why {topic} is getting attention.",
-            f"The story behind {topic} and what fans noticed most.",
-            f"{topic}: best moments, reactions, and audience takeaways.",
-            f"A short BTS-style breakdown of the next campaign or event moment.",
-            f"Fan reactions to the latest {topic} appearance or campaign."
-        ]
-    if "Challenge" in fmt:
-        return [
-            f"A higher-stakes follow-up built around {domain}.",
-            f"A team or creator-versus-creator version of the current winning challenge format.",
-            f"A viewer-prediction challenge where the audience chooses who should win next.",
-            f"A survival/time-limit variation that keeps the same stakes but changes the setting.",
-            f"A behind-the-challenge breakdown showing what made the strongest upload difficult or surprising."
-        ]
-    if "Behind" in fmt:
-        return [
-            f"What viewers missed behind the scenes of {topic}.",
-            f"How {topic} was made: insider details and fan questions answered.",
-            f"The unseen moments behind {second_topic}.",
-            f"Cast, crew, or creator reactions to the strongest recent upload.",
-            f"A comparison of behind-the-scenes moments viewers cared about most."
-        ]
-    if "Review" in fmt or "Comparison" in fmt:
-        return [
-            f"{topic} reviewed through the one question viewers care about most.",
-            f"{topic} vs {second_topic}: which one deserves more attention?",
-            f"Ranking the strongest recent uploads by viewer payoff.",
-            f"What viewers loved and questioned about {topic}.",
-            f"A comments-led follow-up answering the biggest audience debate."
-        ]
-    return [
-        f"A sharper follow-up built around {domain} with a clearer payoff.",
-        f"A comparison or ranking angle connected to {domain}.",
-        f"A viewer-response upload based on comments from the strongest recent videos.",
-        f"A breakdown explaining why the strongest recent format is working.",
-        f"An adjacent experiment that keeps the same viewer promise but changes the format."
-    ]
-
-
 def build_smart_growth_fallback(channel, videos):
-    """Pattern-driven fallback strategy for any YouTube channel."""
-    df = prepare_video_dataframe(videos)
-    channel_name = channel.get("title", "This channel")
-
-    if df.empty:
-        return {
-            "winning_pattern": "Not enough recent upload data",
-            "strategic_diagnosis": f"{channel_name} needs more recent upload data before Stratify can identify a reliable growth pattern.",
-            "top_3_opportunities": [
-                "Analyze at least 5 recent uploads before making channel-level strategy decisions.",
-                "Compare recent titles, topics, and engagement to find early signs of repeatable demand.",
-                "Start with one focused content lane instead of testing too many unrelated ideas."
-            ],
-            "next_upload_recommendation": "Create one upload close to the clearest existing audience interest, then compare it against the channel average.",
-            "seven_day_plan": [
-                "Day 1: Collect at least 5 recent uploads for analysis.",
-                "Day 2: Identify which upload has the strongest views and engagement.",
-                "Day 3: Write 3 follow-up ideas based on that upload.",
-                "Day 4: Pick the idea with the clearest viewer promise.",
-                "Day 5: Create 3 title options and choose the clearest one.",
-                "Day 6: Prepare a thumbnail around one obvious visual promise.",
-                "Day 7: Publish or schedule the next upload and record the baseline metrics."
-            ],
-            "thirty_day_plan": [
-                "Week 1: Build a baseline from recent uploads.",
-                "Week 2: Publish one follow-up to the strongest upload.",
-                "Week 3: Test one adjacent idea while keeping the same audience promise.",
-                "Week 4: Review results and repeat only the formats that beat the channel average."
-            ],
-            "specific_video_ideas": [
-                "A direct follow-up to the strongest recent upload.",
-                "A ranking or comparison version of the strongest recent topic.",
-                "A viewer-requested sequel based on recent comments."
-            ],
-            "what_to_avoid": "Avoid making broad strategy changes from too little data."
-        }
-
-    score_col = "performance_score" if "performance_score" in df.columns else "views"
-    top_df = df.sort_values(score_col, ascending=False).head(8)
-    top_titles = top_df["title"].fillna("").astype(str).tolist()
-    top_title = top_titles[0] if top_titles else "the strongest recent upload"
-    top_examples = "; ".join(top_titles[:3])
-    pattern = infer_growth_pattern_from_videos(channel, videos)
-    topics = pattern.get("topics") or []
-    domain = pattern.get("domain", "the strongest recurring viewer interest")
-    topic_phrase = ", ".join(topics[:3]) if topics else domain
-    ideas = _build_specific_ideas(pattern, top_title)
-    confidence = pattern.get("confidence", "Medium")
-    low_data_note = " Because the recent sample is small, treat this as a hypothesis to validate, not a final channel truth." if confidence == "Low" else ""
+    signals = get_channel_signal_summary(videos)
+    top_video = signals["top_video"]
+    top_title = top_video.get("title") if top_video else "the strongest recent upload"
+    keywords = ", ".join(signals["keywords"]) if signals["keywords"] else "the highest-performing recent topics"
 
     return {
-        "winning_pattern": pattern["pattern_name"],
-        "strategic_diagnosis": (
-            f"{channel_name}'s strongest recent signal is {pattern['pattern_name']}. "
-            f"The evidence comes from uploads such as: {top_examples}. "
-            f"{pattern['strategy_angle']} "
-            f"{low_data_note}"
-        ).strip(),
-        "top_3_opportunities": [
-            f"Build a repeatable content lane around {pattern['format_signal'].lower()} for {domain}, instead of letting each upload feel disconnected.",
-            f"Use {pattern['motivation_signal']} as the packaging principle: titles, thumbnails, and hooks should make that payoff obvious before the click.",
-            f"Test one adjacent format using the same viewer promise, such as community questions, behind-the-scenes context, comparison, or comments-led follow-up."
+        "positioning": f"Position {channel.get('title', 'this channel')} around the clearest repeatable promise visible in recent uploads. The strongest strategic signal is {top_title}, which should be studied as a template for topic selection, title framing, and viewer expectation. Instead of chasing unrelated trends, the channel should build a recognizable content lane around {keywords}.",
+        "content_pillars": [
+            f"Repeatable winners: build more videos around themes similar to {top_title}, because recent performance suggests that familiar topics and clear framing are easier for viewers to click.",
+            f"Search and discovery: create videos around recurring title themes such as {keywords}, using searchable phrases like explained, best moments, ranking, breakdown, or why it worked.",
+            "Community-led content: turn recurring comments, fan debates, and audience questions into videos so viewers feel directly involved in the channel direction.",
+            "Packaging experiments: test stronger title promises and thumbnail layouts while keeping the underlying topic close to proven winners."
         ],
-        "next_upload_recommendation": (
-            f"Create a fresh upload in the {pattern['format_signal'].lower()} lane around {domain}. "
-            f"Use '{top_title}' only as evidence of demand, not as a title to copy. "
-            "The next title should make the viewer payoff clearer in the first few words."
-        ),
-        "seven_day_plan": [
-            "Day 1: Review the top 5 recent uploads by performance score, views, and engagement.",
-            f"Day 2: Validate whether the real promise is {pattern['motivation_signal']} within {domain}.",
-            "Day 3: Write 5 follow-up ideas that keep the same promise but change the angle.",
-            "Day 4: Pick the strongest idea and create 3 title options with a specific viewer payoff.",
-            "Day 5: Plan the thumbnail around one clear visual promise.",
-            "Day 6: Prepare the opening hook so the first 10-15 seconds confirm the title promise.",
-            "Day 7: Publish or schedule the upload and compare it against recent channel averages."
+        "growth_moves": [
+            "Create 2-3 named recurring series so subscribers know what kind of video is coming next.",
+            "Use the top five recent videos as templates for new titles rather than starting from scratch for each upload.",
+            "Add stronger opening hooks that confirm the title promise within the first 10-15 seconds.",
+            "Track performance by format, not only by video, so weak experiments can be stopped quickly and winners can be repeated."
         ],
-        "thirty_day_plan": [
-            f"Week 1: Validate the winning pattern: {pattern['pattern_name']}.",
-            "Week 2: Publish 1-2 uploads that repeat the viewer promise with cleaner packaging.",
-            "Week 3: Test one adjacent variation while keeping the same audience motivation.",
-            "Week 4: Review views, engagement, comments, performance score, and viral score. Keep only formats that beat the channel average."
-        ],
-        "specific_video_ideas": ideas,
-        "what_to_avoid": "Do not blindly copy the top title or chase a random trend. Extract the repeatable viewer promise, then test adjacent angles with measurable results."
+        "upload_strategy": f"The recent upload cadence is approximately {signals['uploads_per_week']} videos per week based on the analyzed sample. A strong plan is to publish mostly proven formats, with one controlled experiment after every few safe uploads. Review results every 10-15 videos and keep only the formats that beat the channel average for engagement and performance score.",
+        "next_5_video_ideas": [
+            f"A sequel or follow-up to {top_title} with a sharper title promise.",
+            f"A ranking video built around {keywords}.",
+            "A short breakdown explaining why the strongest recent video worked.",
+            "A compilation or analysis video built around the most recognizable recurring topic.",
+            "A community-response video based on comments or fan debate from recent uploads."
+        ]
     }
+
 
 def build_smart_dna_fallback(channel, videos):
     signals = get_channel_signal_summary(videos)
@@ -1203,93 +743,6 @@ def youtube_get(endpoint, params):
 
     return response.json()
 
-def detect_video_formats(videos):
-    formats = {
-        "Trailer": 0,
-        "Behind The Scenes": 0,
-        "Interview": 0,
-        "Compilation": 0,
-        "Speech/Event": 0,
-        "Review": 0,
-        "Shorts": 0
-    }
-
-    for video in videos:
-        title = str(video.get("title", "")).lower()
-
-        if "trailer" in title:
-            formats["Trailer"] += 1
-
-        if "behind" in title:
-            formats["Behind The Scenes"] += 1
-
-        if "interview" in title:
-            formats["Interview"] += 1
-
-        if "speech" in title or "event" in title:
-            formats["Speech/Event"] += 1
-
-        if "review" in title:
-            formats["Review"] += 1
-
-        if "shorts" in title:
-            formats["Shorts"] += 1
-
-    return formats
-
-def detect_topics(videos):
-    topic_counts = {}
-
-    for video in videos:
-
-        words = re.findall(
-            r"\b[A-Za-z]{4,}\b",
-            str(video.get("title", ""))
-        )
-
-        for word in words:
-
-            word = word.title()
-
-            if word in [
-                "Official",
-                "Trailer",
-                "Video",
-                "Behind",
-                "Scenes",
-                "Latest",
-                "Watch"
-            ]:
-                continue
-
-            topic_counts[word] = topic_counts.get(word, 0) + 1
-
-    return sorted(
-        topic_counts.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:10]
-
-def detect_winning_pattern(videos):
-
-    formats = detect_video_formats(videos)
-    topics = detect_topics(videos)
-
-    top_format = max(
-        formats,
-        key=formats.get
-    )
-
-    top_topics = [
-        t[0]
-        for t in topics[:3]
-    ]
-
-    return {
-        "top_format": top_format,
-        "top_topics": top_topics,
-        "formats": formats
-    }
 
 def extract_video_id(url):
     try:
@@ -1507,14 +960,7 @@ def get_recent_channel_videos(channel_id, max_results=20):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def generate_ai_json(prompt, fallback):
-    """Generate valid JSON from NVIDIA.
-
-    Important: if this fails, Stratify returns the fallback strategy.
-    Growth Strategy quality depends on this function successfully parsing JSON.
-    """
     if not NVIDIA_API_KEY:
-        fallback = dict(fallback or {})
-        fallback["_strategy_source"] = "fallback_no_api_key"
         return fallback
 
     headers = {
@@ -1527,37 +973,26 @@ def generate_ai_json(prompt, fallback):
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You are a senior YouTube growth strategist. "
-                    "Return only valid JSON. No markdown. No commentary outside JSON."
-                )
+                "content": "You are a YouTube analytics strategist. Return only valid JSON. No markdown."
             },
-            {"role": "user", "content": prompt}
+            {
+                "role": "user",
+                "content": prompt
+            }
         ],
-        "temperature": 0.25,
-        "max_tokens": 2600
+        "temperature": 0.4,
+        "max_tokens": 1200
     }
 
     try:
-        response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=45)
+        response = requests.post(NVIDIA_URL, headers=headers, json=payload, timeout=30)
         if response.status_code != 200:
-            fallback = dict(fallback or {})
-            fallback["_strategy_source"] = f"fallback_api_error_{response.status_code}"
             return fallback
 
-        text = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        text = response.json()["choices"][0]["message"]["content"]
         parsed = extract_json(text)
-
-        if isinstance(parsed, dict):
-            parsed["_strategy_source"] = "ai"
-            return parsed
-
-        fallback = dict(fallback or {})
-        fallback["_strategy_source"] = "fallback_json_parse_failed"
-        return fallback
-    except Exception as exc:
-        fallback = dict(fallback or {})
-        fallback["_strategy_source"] = f"fallback_exception_{type(exc).__name__}"
+        return parsed if parsed else fallback
+    except Exception:
         return fallback
 
 
@@ -1581,11 +1016,10 @@ def calculate_creator_scorecard(channel, videos):
 
     df = prepare_video_dataframe(videos)
 
-    avg_views = safe_float(df["views"].mean())
-    avg_engagement = safe_float(df["engagement_rate"].mean())
-    avg_video_score = safe_float(df["performance_score"].mean())
-    avg_viral_score = safe_float(df["viral_score"].mean()) if "viral_score" in df else 0
-    subscribers = safe_float(channel.get("subscribers", 0))
+    avg_views = df["views"].mean()
+    avg_engagement = df["engagement_rate"].mean()
+    avg_video_score = df["performance_score"].mean()
+    subscribers = channel.get("subscribers", 0)
 
     upload_dates = pd.to_datetime(df["published_at"], errors="coerce", utc=True).dropna()
     if len(upload_dates) >= 2:
@@ -1594,101 +1028,62 @@ def calculate_creator_scorecard(channel, videos):
     else:
         uploads_per_week = 0
 
-    consistency_score = min((uploads_per_week / 3) * 100, 100)
+    consistency_score = min(uploads_per_week / 3 * 100, 100)
 
-    if subscribers >= 10_000_000:
-        engagement_benchmark = 2.5
-    elif subscribers >= 1_000_000:
-        engagement_benchmark = 3.0
-    elif subscribers >= 100_000:
-        engagement_benchmark = 4.0
-    elif subscribers >= 10_000:
-        engagement_benchmark = 5.0
-    else:
-        engagement_benchmark = 6.0
-
-    engagement_score = min((avg_engagement / engagement_benchmark) * 100, 100)
+    engagement_score = min(avg_engagement / 8 * 100, 100)
 
     if len(df) >= 6:
-        recent_avg = safe_float(df.head(5)["views"].mean())
-        older_avg = safe_float(df.tail(5)["views"].mean())
-        momentum_ratio = recent_avg / max(older_avg, 1)
-
-        if momentum_ratio >= 1.2:
-            momentum_score = 100
-        elif momentum_ratio >= 1.0:
-            momentum_score = 85
-        elif momentum_ratio >= 0.8:
-            momentum_score = 70
-        elif momentum_ratio >= 0.6:
-            momentum_score = 55
-        else:
-            momentum_score = 40
+        recent_avg = df.head(5)["views"].mean()
+        older_avg = df.tail(5)["views"].mean()
+        momentum_score = min((recent_avg / max(older_avg, 1)) * 60, 100)
     else:
-        momentum_score = min(avg_video_score + 20, 100)
+        momentum_score = min(avg_video_score, 100)
 
-    view_to_sub_ratio = avg_views / max(subscribers, 1)
-
-    if view_to_sub_ratio >= 0.25:
-        audience_pull_score = 100
-    elif view_to_sub_ratio >= 0.15:
-        audience_pull_score = 90
-    elif view_to_sub_ratio >= 0.08:
-        audience_pull_score = 75
-    elif view_to_sub_ratio >= 0.04:
-        audience_pull_score = 60
-    elif view_to_sub_ratio >= 0.015:
-        audience_pull_score = 45
-    else:
-        audience_pull_score = 30
+    audience_pull_score = min((avg_views / max(subscribers, 1)) * 1000, 100)
 
     title_scores = []
     for title in df["title"].fillna(""):
-        title = str(title).strip()
-        score = 45
-
-        if 18 <= len(title) <= 75:
-            score += 20
+        score = 0
+        if len(title) >= 35:
+            score += 30
         if any(char.isdigit() for char in title):
-            score += 10
-        if any(word.lower() in title.lower() for word in ["why", "how", "best", "top", "explained", "secret", "moment", "scene", "survived", "built", "gave", "spent", "tried"]):
-            score += 15
-        if len(title.split()) >= 4:
-            score += 10
-
-        title_scores.append(min(score, 100))
+            score += 20
+        if any(word.lower() in title.lower() for word in ["why", "how", "best", "top", "explained", "secret", "moment", "scene"]):
+            score += 25
+        if len(title) <= 80:
+            score += 25
+        title_scores.append(score)
 
     optimization_score = sum(title_scores) / len(title_scores)
 
-    comment_like_ratio = safe_float(df["comments"].mean()) / max(safe_float(df["likes"].mean()), 1)
-    content_depth_score = min(comment_like_ratio / 0.08 * 100, 100)
+    content_depth_score = min((df["comments"].mean() / max(df["likes"].mean(), 1)) * 500, 100)
 
     overall = (
-        consistency_score * 0.15 +
-        engagement_score * 0.18 +
-        momentum_score * 0.18 +
-        audience_pull_score * 0.24 +
+        consistency_score * 0.18 +
+        engagement_score * 0.22 +
+        momentum_score * 0.20 +
+        audience_pull_score * 0.15 +
         optimization_score * 0.15 +
         content_depth_score * 0.10
     )
 
     overall = round(overall, 1)
 
-    if overall >= 88:
+    if overall >= 85:
         grade = "A+"
-        verdict = "Excellent creator health. The channel shows strong demand, repeatable audience pull, and healthy growth signals."
-    elif overall >= 78:
+        verdict = "Excellent creator health. The channel has strong audience pull, engagement, and growth signals."
+    elif overall >= 75:
         grade = "A"
-        verdict = "Strong creator health. The channel is performing well and should focus on scaling its strongest formats."
+        verdict = "Strong creator health. The channel is performing well with room to improve consistency or packaging."
     elif overall >= 65:
         grade = "B"
-        verdict = "Good creator health. The channel has a solid foundation but still has clear improvement opportunities."
+        verdict = "Good foundation. The channel has clear potential but needs stronger repeatable content systems."
     elif overall >= 50:
         grade = "C"
-        verdict = "Moderate creator health. The channel has some working signals but needs stronger repeatable growth systems."
+        verdict = "Moderate creator health. The channel needs better content packaging, consistency, and audience retention signals."
     else:
         grade = "D"
-        verdict = "Weak creator health right now. Focus on clearer positioning, stronger packaging, and more consistent audience pull."
+        verdict = "Weak creator health right now. Focus on consistency, stronger titles, and clearer content positioning."
 
     return {
         "overall_score": overall,
@@ -1840,7 +1235,7 @@ def calculate_growth_diagnosis(channel, videos, scorecard):
         55,
         "High",
         "The content may get views, but viewers are not reacting strongly enough to signal deeper interest.",
-        f"Viewers are consuming the content but reacting very little. Average engagement is around {round(avg_engagement, 2)}%, which means likes and comments are low compared with recent reach.",
+        f"Engagement score is {scorecard.get('engagement_score', 0)}/100 with average engagement around {round(avg_engagement, 2)}%.",
         "Add stronger emotional payoff, clearer comment triggers, and moments that invite viewers to react or share."
     )
 
@@ -1860,7 +1255,7 @@ def calculate_growth_diagnosis(channel, videos, scorecard):
         45,
         "High",
         "The channel may not be converting its subscriber base or potential audience into strong view demand.",
-        f"Recent uploads are reaching only a small part of the subscriber base. The channel averages {format_number(avg_views)} recent views against {format_number(subscribers)} subscribers, suggesting many subscribers are not returning for new uploads.",
+        f"Audience Pull score is {scorecard.get('audience_pull_score', 0)}/100. Average recent views are {format_number(avg_views)} against {format_number(subscribers)} subscribers.",
         "Double down on topics that already outperform the channel average and make the viewer payoff obvious in the title."
     )
 
@@ -1870,7 +1265,7 @@ def calculate_growth_diagnosis(channel, videos, scorecard):
         50,
         "Medium",
         "Recent uploads may not be keeping up with older uploads, which can signal format fatigue or weaker ideas.",
-        f"Recent uploads are performing noticeably worse than older uploads, suggesting the channel may be losing momentum or moving away from formats that previously worked.",
+        f"Momentum score is {scorecard.get('momentum_score', 0)}/100 based on recent versus older upload performance.",
         "Compare your newest uploads against your strongest older uploads and bring back the formats with clearer demand."
     )
 
@@ -1880,7 +1275,7 @@ def calculate_growth_diagnosis(channel, videos, scorecard):
         35,
         "Medium",
         "Viewers may be watching passively instead of joining the conversation, which limits community growth.",
-        f"Viewers are watching but not joining the conversation. Comment activity is low compared with likes, which limits community signal and repeat engagement.",
+        f"Community Depth score is {scorecard.get('content_depth_score', 0)}/100, based on comment depth relative to likes.",
         "Ask sharper questions, create debate moments, and use pinned comments to turn viewers into participants."
     )
 
@@ -1992,12 +1387,7 @@ def calculate_growth_diagnosis(channel, videos, scorecard):
 
 def render_growth_diagnosis(diagnosis):
     st.subheader("Growth Diagnosis")
-    st.caption("This section identifies the highest-priority growth issue from the scorecard and shows what to fix first.")
-
-    blockers = diagnosis.get("blockers", [])
-    primary_blocker = escape(str(diagnosis.get("primary_blocker", "Not available")))
-    impact = escape(str(diagnosis.get("impact", "Unknown")))
-    confidence = diagnosis.get("confidence", 0)
+    st.caption("The goal is simple: reduce creator uncertainty by showing the biggest blocker and the next best action.")
 
     g1, g2, g3 = st.columns([1.4, 1, 1])
 
@@ -2005,45 +1395,40 @@ def render_growth_diagnosis(diagnosis):
         st.markdown(
             f"""
             <div class="score-card">
-               <div class="small-muted">Biggest Growth Opportunity</div>
-                <h1 style="font-size:34px;margin:10px 0;line-height:1.15;">{primary_blocker}</h1>
-                <div style="font-size:18px;font-weight:700;">Opportunity Size: {impact}</div>
+                <div class="small-muted">Primary Growth Blocker</div>
+                <h1 style="font-size:34px;margin:10px 0;line-height:1.15;">{escape(str(diagnosis.get('primary_blocker', 'Not available')))}</h1>
+                <div style="font-size:18px;font-weight:700;">Impact: {escape(str(diagnosis.get('impact', 'Unknown')))}</div>
             </div>
             """,
             unsafe_allow_html=True
         )
 
     with g2:
-        render_metric_card("Evidence Strength", f"{confidence}/100")
+        render_metric_card("Diagnosis Confidence", f"{diagnosis.get('confidence', 0)}/100")
 
     with g3:
-        render_metric_card(
-        "Estimated Impact",
-        diagnosis.get("impact", "Unknown")
-    )
+        render_metric_card("Decision Focus", "Fix First")
 
-    render_ai_insight("Highest ROI Improvement", diagnosis.get("quick_fix", "Focus on the highest-impact blocker first."))
+    render_ai_insight("What To Fix First", diagnosis.get("quick_fix", "Focus on the highest-impact blocker first."))
     render_ai_insight("Why This Matters", diagnosis.get("why_it_matters"))
-    render_list(
-        "Why We Believe This",
-        diagnosis.get("evidence", [])
-    )
+    render_list("Evidence", diagnosis.get("evidence", []))
     render_list("Next 7-Day Action Plan", diagnosis.get("seven_day_plan", diagnosis.get("action_plan", [])))
+    render_list("Action Plan", diagnosis.get("action_plan", []))
     render_ai_insight("What To Avoid", diagnosis.get("avoid"))
 
+    blockers = diagnosis.get("blockers", [])
     if blockers:
         blocker_df = pd.DataFrame([
             {
                 "Priority": i + 1,
                 "Growth Blocker": item["blocker"],
                 "Impact": item["impact"],
-                "Current Score": item["score"],
-                "Target Score": item["threshold"],
-                "Severity Gap": item["severity"]
+                "Score": item["score"],
+                "Target": item["threshold"],
+                "Severity": item["severity"]
             }
             for i, item in enumerate(blockers)
         ])
-        st.markdown("### Growth Opportunity Rankings")
         st.dataframe(blocker_df, width="stretch")
 
 
@@ -2114,148 +1499,40 @@ def get_video_ai_insights(video, transcript):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_growth_strategy(channel, videos):
-    """Generate a channel-specific growth strategy.
-
-    Pattern Engine creates the data context. AI writes the consulting-grade strategy.
-    Fallback is used only when the AI key/API/JSON parsing fails.
-    """
     fallback = build_smart_growth_fallback(channel, videos)
-    df = prepare_video_dataframe(videos)
 
-    if df.empty:
-        return fallback
-
-    scorecard = calculate_creator_scorecard(channel, videos)
-    diagnosis = calculate_growth_diagnosis(channel, videos, scorecard)
-    pattern = infer_growth_pattern_from_videos(channel, videos)
-
-    # Keep the AI context compact so the model has enough room to return valid JSON.
-    top_df = df.sort_values("performance_score", ascending=False).head(12)
-    top_video_rows = []
-    for _, row in top_df.iterrows():
-        top_video_rows.append({
-            "title": str(row.get("title", ""))[:160],
-            "views": int(safe_float(row.get("views", 0))),
-            "engagement_rate": safe_float(row.get("engagement_rate", 0)),
-            "performance_score": safe_float(row.get("performance_score", 0)),
-            "viral_score": safe_float(row.get("viral_score", 0)),
-        })
-
-    pattern_context = {
-        "pattern_name": fallback.get("winning_pattern", pattern.get("pattern_name", "")),
-        "format_signal": pattern.get("format_signal", ""),
-        "secondary_format": pattern.get("secondary_format", ""),
-        "motivation_signal": pattern.get("motivation_signal", ""),
-        "archetypes": pattern.get("archetypes", [])[:3],
-        "domain": pattern.get("domain", ""),
-        "confidence": pattern.get("confidence", "Medium"),
-        "topics": pattern.get("topics", [])[:5],
-        "top_titles": pattern.get("top_titles", [])[:5],
-    }
+    video_summary = "\n".join([
+        f"- {v['title']} | Views: {v['views']} | Likes: {v['likes']} | Comments: {v['comments']} | Engagement: {v['engagement_rate']}% | Score: {v['performance_score']}"
+        for v in videos[:18]
+    ])
 
     prompt = f"""
-Return ONLY valid JSON. No markdown. No text outside JSON.
+    You are Stratify, a premium YouTube growth strategist.
+    Create a detailed growth strategy for this creator using the recent video data.
 
-You are Stratify, a premium YouTube growth strategist.
-Your job is NOT to copy titles. Your job is to infer the repeatable viewer promise behind the channel's strongest recent uploads.
+    Channel: {channel["title"]}
+    Description: {channel["description"][:1200]}
+    Subscribers: {channel["subscribers"]}
+    Total Views: {channel["views"]}
+    Video Count: {channel["video_count"]}
 
-Channel:
-Name: {channel.get('title', '')}
-Description: {channel.get('description', '')[:900]}
-Subscribers: {format_number(channel.get('subscribers', 0))}
-Total Views: {format_number(channel.get('views', 0))}
-Video Count: {format_number(channel.get('video_count', 0))}
+    Recent Videos:
+    {video_summary}
 
-Creator Scorecard:
-Overall: {scorecard.get('overall_score', 0)}/100, Grade: {scorecard.get('grade', 'N/A')}
-Engagement: {scorecard.get('engagement_score', 0)}/100
-Audience Pull: {scorecard.get('audience_pull_score', 0)}/100
-Packaging: {scorecard.get('optimization_score', 0)}/100
-Community Depth: {scorecard.get('content_depth_score', 0)}/100
+    Return ONLY valid JSON with these exact keys:
+    {{
+      "positioning": "A detailed paragraph of 3-5 sentences explaining the channel's best strategic positioning.",
+      "content_pillars": ["3-5 detailed bullet points. Each bullet must be a full sentence with strategic reasoning.", "...", "..."],
+      "growth_moves": ["4-6 detailed action steps. Each step must explain what to do and why.", "...", "..."],
+      "upload_strategy": "A detailed 3-5 sentence upload plan with cadence, experiment ratio, and review cycle.",
+      "next_5_video_ideas": ["Five specific video ideas tailored to this channel, not generic one-liners.", "...", "...", "...", "..."]
+    }}
 
-Growth Diagnosis:
-Opportunity: {diagnosis.get('primary_blocker', '')}
-Why it matters: {diagnosis.get('why_it_matters', '')}
-
-Pattern Engine Context:
-{json.dumps(pattern_context, ensure_ascii=False)}
-
-Top videos by performance:
-{json.dumps(top_video_rows, ensure_ascii=False)}
-
-Required JSON keys exactly:
-{{
-  "winning_pattern": "One clear, channel-specific pattern. Name the format + viewer motivation. Do not copy a title.",
-  "strategic_diagnosis": "4-6 sentences. Explain what is working, why it is working, what is limiting growth, and the highest ROI direction. Mention 2 actual titles only as evidence, not as recommendations.",
-  "top_3_opportunities": [
-    "Specific opportunity grounded in the channel's strongest repeatable format.",
-    "Specific opportunity based on audience motivation or content gap.",
-    "Specific opportunity to improve comments, packaging, or repeat viewing."
-  ],
-  "next_upload_recommendation": "Give one concrete next upload recommendation with one specific title idea in quotes. It must be a fresh idea, not a copied title with one word added.",
-  "specific_video_ideas": [
-    "Fresh video idea 1 with a concrete title-style phrase.",
-    "Fresh video idea 2 with a concrete title-style phrase.",
-    "Fresh video idea 3 with a concrete title-style phrase.",
-    "Fresh video idea 4 with a concrete title-style phrase.",
-    "Fresh video idea 5 with a concrete title-style phrase."
-  ],
-  "seven_day_plan": [
-    "Day 1 action specific to this channel.",
-    "Day 2 action specific to this channel.",
-    "Day 3 action specific to this channel.",
-    "Day 4 action specific to this channel.",
-    "Day 5 action specific to this channel.",
-    "Day 6 action specific to this channel.",
-    "Day 7 action specific to this channel."
-  ],
-  "thirty_day_plan": [
-    "Week 1 plan specific to the winning pattern.",
-    "Week 2 plan specific to the winning pattern.",
-    "Week 3 plan specific to an adjacent experiment.",
-    "Week 4 plan specific to reviewing results."
-  ],
-  "what_to_avoid": "Specific warning for this channel. Do not be generic."
-}}
-
-Rules:
-- Do not say N/A.
-- Do not recommend copying the top title.
-- Do not use generic advice like post consistently unless consistency is the actual problem.
-- Do not force the same formats across channels.
-- If the channel is trailer/release-driven, focus on release cycle strategy.
-- If the channel is music-driven, focus on song campaigns, artist/fan reactions, lyrics, and release momentum.
-- If the channel is challenge-driven, focus on stakes, escalation, competition, and curiosity gaps.
-- If the channel is speech/interview-driven, focus on event access, strongest speakers, best moments, and fan takeaways.
-- Specific video ideas must sound like real upload ideas, not placeholders.
-- If the channel has fewer than 5 usable recent videos, clearly say the strategy is an early hypothesis.
-- For education channels, focus on practical utility, audience pain points, objections, and skill/career progress.
-- For small channels, avoid overconfident claims and recommend controlled tests.
-- Avoid entity stuffing. Do not turn every actor/product/game name into a strategy. Explain the viewer promise behind them.
-"""
+    Do not return one-liners. Do not return N/A. Do not use markdown. Make it feel like a premium consulting report.
+    """
 
     result = generate_ai_json(prompt, fallback)
-    merged = {**fallback, **(result or {})}
-
-    required_list_keys = ["top_3_opportunities", "specific_video_ideas", "seven_day_plan", "thirty_day_plan"]
-    for key in required_list_keys:
-        if not isinstance(merged.get(key), list) or not merged.get(key):
-            merged[key] = fallback.get(key, [])
-
-    for key in ["winning_pattern", "strategic_diagnosis", "next_upload_recommendation", "what_to_avoid"]:
-        if not merged.get(key):
-            merged[key] = fallback.get(key, "")
-
-    # Backward-compatible fields for older PDF/UI code.
-    merged["positioning"] = merged.get("strategic_diagnosis", fallback.get("strategic_diagnosis", ""))
-    merged["content_pillars"] = merged.get("top_3_opportunities", fallback.get("top_3_opportunities", []))
-    merged["growth_moves"] = merged.get("seven_day_plan", fallback.get("seven_day_plan", []))
-    merged["upload_strategy"] = "\n".join(merged.get("thirty_day_plan", fallback.get("thirty_day_plan", [])))
-    merged["next_5_video_ideas"] = merged.get("specific_video_ideas", fallback.get("specific_video_ideas", []))
-
-    return merged
-
-
+    return {**fallback, **(result or {})}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2744,18 +2021,14 @@ def build_strategy_report(channel, strategy, videos=None):
 
     sections = [
         ("Executive Summary", build_strategy_executive_summary(channel, videos or [])),
-        ("Winning Pattern", strategy.get("winning_pattern")),
-        ("Strategic Diagnosis", strategy.get("strategic_diagnosis", strategy.get("positioning"))),
-        ("Top 3 Growth Opportunities", strategy.get("top_3_opportunities", strategy.get("content_pillars", []))),
-        ("Next Upload Recommendation", strategy.get("next_upload_recommendation")),
-        ("7-Day Action Plan", strategy.get("seven_day_plan", [])),
-        ("30-Day Growth Plan", strategy.get("thirty_day_plan", [])),
-        ("Specific Video Ideas", strategy.get("specific_video_ideas", strategy.get("next_5_video_ideas", []))),
-        ("What To Avoid", strategy.get("what_to_avoid")),
+        ("Recommended Positioning", strategy.get("positioning")),
+        ("Content Pillars", strategy.get("content_pillars", [])),
+        ("Growth Moves", strategy.get("growth_moves", [])),
+        ("Upload Strategy", strategy.get("upload_strategy")),
+        ("Next 5 Video Ideas", strategy.get("next_5_video_ideas", [])),
     ]
 
     return make_pdf_report("Growth Strategy Report", sections, metrics)
-
 
 
 def build_dna_report(channel, dna, videos=None):
@@ -3167,7 +2440,7 @@ with tabs[2]:
 
 with tabs[3]:
     st.header("Growth Strategy Generator")
-    st.caption("A 30-day creator strategy built from recent upload patterns, engagement signals, and repeatable content opportunities.")
+    st.caption("A strategy report built from recent upload patterns, engagement signals, and repeatable content opportunities.")
 
     growth_input = st.text_input(
         "Paste a channel link, @handle, channel name, or video link",
@@ -3188,20 +2461,7 @@ with tabs[3]:
             st.error("Could not analyze this channel.")
             st.stop()
 
-        with st.spinner("Generating channel-specific growth strategy..."):
-            strategy = get_growth_strategy(channel, videos)
-
-        st.session_state["growth_strategy_channel"] = channel
-        st.session_state["growth_strategy_videos"] = videos
-        st.session_state["growth_strategy_result"] = strategy
-
-    if "growth_strategy_result" in st.session_state:
-        channel = st.session_state["growth_strategy_channel"]
-        videos = st.session_state["growth_strategy_videos"]
-        strategy = st.session_state["growth_strategy_result"]
-
         st.subheader(channel["title"])
-
         g1, g2, g3, g4 = st.columns(4)
         with g1:
             render_metric_card("Subscribers", format_number(channel["subscribers"]))
@@ -3216,7 +2476,6 @@ with tabs[3]:
         if videos:
             df = prepare_video_dataframe(videos)
             top_df = df.sort_values("performance_score", ascending=False).head(5)
-
             fig = px.bar(
                 top_df,
                 x="performance_score",
@@ -3236,28 +2495,19 @@ with tabs[3]:
             fig = style_chart(fig, x_title="Performance Score (0-100)", y_title="Video", height=460)
             st.plotly_chart(fig, width="stretch")
 
-        render_ai_insight("Winning Pattern", strategy.get("winning_pattern", ""))
-        render_ai_insight("Strategic Diagnosis", strategy.get("strategic_diagnosis", strategy.get("positioning", "")))
+        with st.spinner("Generating premium growth strategy..."):
+            strategy = get_growth_strategy(channel, videos)
 
-        render_list("Top 3 Growth Opportunities", strategy.get("top_3_opportunities", strategy.get("content_pillars", [])))
+        render_ai_insight("Recommended Positioning", strategy.get("positioning", ""))
 
-        render_ai_insight("Next Upload Recommendation", strategy.get("next_upload_recommendation", ""))
+        col_a, col_b = st.columns(2)
+        with col_a:
+            render_list("Content Pillars", strategy.get("content_pillars", []))
+        with col_b:
+            render_list("Growth Moves", strategy.get("growth_moves", []))
 
-        render_list("Specific Video Ideas", strategy.get("specific_video_ideas", strategy.get("next_5_video_ideas", [])))
-
-        plan_choice = st.radio(
-            "Choose your action plan",
-            ["7-Day Action Plan", "30-Day Growth Plan"],
-            horizontal=True,
-            key="growth_strategy_plan_choice"
-        )
-
-        if plan_choice == "7-Day Action Plan":
-            render_list("7-Day Action Plan", strategy.get("seven_day_plan", strategy.get("growth_moves", [])))
-        else:
-            render_list("30-Day Growth Plan", strategy.get("thirty_day_plan", []))
-
-        render_ai_insight("What To Avoid", strategy.get("what_to_avoid", ""))
+        render_ai_insight("Upload Strategy", strategy.get("upload_strategy", ""))
+        render_list("Next 5 Video Ideas", strategy.get("next_5_video_ideas", []))
 
         if videos:
             st.subheader("Recent Upload Signals")
